@@ -31,6 +31,11 @@ impl Object {
         } 
     }
 
+    pub fn set_location(&mut self, x_amount: i32, y_amount: i32) {
+        self.location_x = x_amount;
+        self.location_y = y_amount;
+    }
+
     pub fn draw(&self, console: &mut dyn Console) {
         console.set_default_foreground(self.color);
         console.put_char(
