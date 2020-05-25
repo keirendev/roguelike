@@ -166,7 +166,7 @@ fn create_vertical_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
 
 fn main() {
     let root = Root::initializer()
-        .font("arial10x10.png", FontLayout::Tcod)
+        .font("res/arial10x10.png", FontLayout::Tcod)
         .font_type(FontType::Greyscale)
         .size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .title("Rust roguelike demo")
