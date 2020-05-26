@@ -2,6 +2,7 @@ use rand::Rng;
 use std::cmp;
 use tcod::colors::*;
 use tcod::console::*;
+use tcod::map::{FovAlgorithm, Map as FovMap};
 
 mod object;
 use object::Object;
@@ -26,11 +27,25 @@ const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
 
+const FOV_ALGO: FovAlgorithm = FovAlgorithm::Basic;
+const FOV_LIGHT_WALLS: bool = true;
+const TORCH_RADIUS: i32 = 10;
+
 const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
+const COLOR_LIGHT_WALL: Color = Color {
+    r: 130,
+    g: 110,
+    b: 50,
+};
 const COLOR_DARK_GROUND: Color = Color {
     r: 50,
     g: 50,
     b: 150,
+};
+const COLOR_LIGHT_GROUND: Color = Color {
+    r: 200,
+    g: 180,
+    b: 50,
 };
 
 const LIMIT_FPS: i32 = 20;
@@ -38,6 +53,7 @@ const LIMIT_FPS: i32 = 20;
 struct Tcod {
     root: Root,
     console: Offscreen,
+    fov: FovMap,
 }
 
 fn handle_key_input(tcod: &mut Tcod, player: &mut Object, game: &Game) -> bool {
@@ -94,11 +110,8 @@ fn make_map(player: &mut Object) -> Map {
 
             if rooms.is_empty() {
                 player.set_location(new_x, new_y);
-            }
-
-            else {
+            } else {
                 let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
-            
                 if rand::random() {
                     create_horizontal_tunnel(prev_x, new_x, prev_y, &mut map);
                     create_vertical_tunnel(prev_y, new_y, new_x, &mut map);
@@ -115,20 +128,44 @@ fn make_map(player: &mut Object) -> Map {
     map
 }
 
-fn render_all(tcod: &mut Tcod, game: &Game, objects: &[Object]) {
+fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recompute: bool) {
+    if fov_recompute {
+        let player_location = &objects[0].get_location();
+
+        tcod.fov.compute_fov(
+            player_location.0,
+            player_location.1,
+            TORCH_RADIUS,
+            FOV_LIGHT_WALLS,
+            FOV_ALGO,
+        );
+    }
     for object in objects {
-        object.draw(&mut tcod.console);
+        let object_location = object.get_location();
+        if tcod.fov.is_in_fov(object_location.0, object_location.1) {
+            object.draw(&mut tcod.console);
+        }
     }
 
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
+            let visible = tcod.fov.is_in_fov(x, y);
             let wall = game.map[x as usize][y as usize].block_sight;
-            if wall {
+            let color = match (visible, wall) {
+                (false, true) => COLOR_DARK_WALL,
+                (false, false) => COLOR_DARK_GROUND,
+                (true, true) => COLOR_LIGHT_WALL,
+                (true, false) => COLOR_LIGHT_GROUND,
+            };
+
+            let explored = &mut game.map[x as usize][y as usize].explored;
+
+            if visible {
+                *explored = true;
+            }
+            if *explored {
                 tcod.console
-                    .set_char_background(x, y, COLOR_DARK_WALL, BackgroundFlag::Set);
-            } else {
-                tcod.console
-                    .set_char_background(x, y, COLOR_DARK_GROUND, BackgroundFlag::Set);
+                    .set_char_background(x, y, color, BackgroundFlag::Set);
             }
         }
     }
@@ -172,21 +209,19 @@ fn main() {
         .title("Rust roguelike demo")
         .init();
 
-    let console = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
-
-    let mut tcod = Tcod { root, console };
+    let mut tcod = Tcod {
+        root,
+        console: Offscreen::new(MAP_WIDTH, MAP_HEIGHT),
+        fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
+    };
 
     tcod::system::set_fps(LIMIT_FPS);
 
     let player_char = '@';
     let player_color = WHITE;
 
-    let player = Object::new(
-        0,
-        0,
-        player_char,
-        player_color,
-    );
+    let player = Object::new(0, 0, player_char, player_color);
+    let mut previous_player_position = player.get_location();
 
     let default_npc_location_width = (WINDOW_WIDTH / 2) - 5;
     let default_npc_location_height = WINDOW_HEIGHT / 2;
@@ -202,14 +237,31 @@ fn main() {
 
     let mut objects = [player, npc];
 
-    let game = Game { map: make_map(&mut objects[0]) };
+    let mut game = Game {
+        map: make_map(&mut objects[0]),
+    };
+
+    for y in 0..MAP_HEIGHT {
+        for x in 0..MAP_WIDTH {
+            tcod.fov.set(
+                x,
+                y,
+                !game.map[x as usize][y as usize].block_sight,
+                !game.map[x as usize][y as usize].blocked,
+            );
+        }
+    }
 
     while !tcod.root.window_closed() {
+        let player_location = objects[0].get_location();
+        let fov_recompute = previous_player_position != (player_location.0, player_location.1);
+
         tcod.console.clear();
-        render_all(&mut tcod, &game, &objects);
+        render_all(&mut tcod, &mut game, &objects, fov_recompute);
         tcod.root.flush();
 
         let player = &mut objects[0];
+        previous_player_position = player_location;
         let exit_game_state = handle_key_input(&mut tcod, player, &game);
         if exit_game_state {
             break;

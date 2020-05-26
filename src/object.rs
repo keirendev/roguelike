@@ -3,7 +3,7 @@ use tcod::console::*;
 
 use crate::game::Game;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Object {
     location_x: i32,
     location_y: i32,
@@ -34,6 +34,10 @@ impl Object {
     pub fn set_location(&mut self, x_amount: i32, y_amount: i32) {
         self.location_x = x_amount;
         self.location_y = y_amount;
+    }
+
+    pub fn get_location(self) -> (i32, i32) {
+        return (self.location_x, self.location_y)
     }
 
     pub fn draw(&self, console: &mut dyn Console) {
