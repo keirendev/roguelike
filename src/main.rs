@@ -27,6 +27,8 @@ const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
 
+const MAX_ROOM_MONSTERS: i32 = 3;
+
 const FOV_ALGO: FovAlgorithm = FovAlgorithm::Basic;
 const FOV_LIGHT_WALLS: bool = true;
 const TORCH_RADIUS: i32 = 10;
@@ -50,43 +52,65 @@ const COLOR_LIGHT_GROUND: Color = Color {
 
 const LIMIT_FPS: i32 = 20;
 
+const PLAYER_ID: usize = 0;
+
 struct Tcod {
     root: Root,
     console: Offscreen,
     fov: FovMap,
 }
 
-fn handle_key_input(tcod: &mut Tcod, player: &mut Object, game: &Game) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlayerAction {
+    TookTurn,
+    DidntTakeTurn,
+    Exit,
+}
+
+fn handle_key_input(tcod: &mut Tcod, objects: &mut Vec<Object>, map: &Map) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
 
+    use PlayerAction::*;
+
     let key = tcod.root.wait_for_keypress(true);
-    match key {
-        Key {
+    let player_alive = objects[PLAYER_ID].alive;
+    match (key, key.text(), player_alive) {
+        (Key {
             code: Enter,
             alt: true,
             ..
-        } => {
+        },
+        _,
+        _,
+    ) => {
             let fullscreen_state = tcod.root.is_fullscreen();
             tcod.root.set_fullscreen(!fullscreen_state);
+            DidntTakeTurn
         }
-        Key { code: Escape, .. } => {
-            let exit_game_state = true;
-            return exit_game_state;
+        (Key { code: Escape, .. }, _, _) => Exit,
+        (Key { code: Up, .. }, _, true) => {
+            player_move_or_attack(0, -1, map, objects);
+            TookTurn
         }
-        Key { code: Up, .. } => player.move_by(0, -1, game),
-        Key { code: Down, .. } => player.move_by(0, 1, game),
-        Key { code: Left, .. } => player.move_by(-1, 0, game),
-        Key { code: Right, .. } => player.move_by(1, 0, game),
+        (Key { code: Down, .. }, _, true) => {
+            player_move_or_attack(0, 1, map, objects);
+            TookTurn
+        }
+        (Key { code: Left, .. }, _, true) => {
+            player_move_or_attack(-1, 0, map, objects);
+            TookTurn
+        }
+        (Key { code: Right, .. }, _, true) => {
+            player_move_or_attack(1, 0, map, objects);
+            TookTurn
+        }
 
-        _ => {}
+        _ => DidntTakeTurn
     }
-
-    let exit_game_state = false;
-    exit_game_state
 }
 
-fn make_map(player: &mut Object) -> Map {
+fn make_map(objects: &mut Vec<Object>) -> Map {
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
 
     let mut rooms = vec![];
@@ -105,11 +129,12 @@ fn make_map(player: &mut Object) -> Map {
 
         if !rooms_intersect {
             create_room(new_room, &mut map);
+            place_objects(new_room, &map, objects);
 
             let (new_x, new_y) = new_room.center();
 
             if rooms.is_empty() {
-                player.set_location(new_x, new_y);
+                objects[PLAYER_ID].set_location(new_x, new_y);
             } else {
                 let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
                 if rand::random() {
@@ -130,7 +155,7 @@ fn make_map(player: &mut Object) -> Map {
 
 fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recompute: bool) {
     if fov_recompute {
-        let player_location = &objects[0].get_location();
+        let player_location = &objects[PLAYER_ID].get_location();
 
         tcod.fov.compute_fov(
             player_location.0,
@@ -201,6 +226,44 @@ fn create_vertical_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
     }
 }
 
+fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
+    let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
+
+    for _ in 0..num_monsters {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        if !object::is_blocked(x, y, map, objects) {
+            let mut monster = if rand::random::<f32>() < 0.8 {
+                Object::new(x, y, 'o', "orc", DESATURATED_GREEN, true)
+            } else {
+                Object::new(x, y, 'T', "troll", DARKER_GREEN, true)
+            };
+            monster.alive = true;
+            objects.push(monster);
+        }
+    }
+}
+
+pub fn player_move_or_attack(x_amount: i32, y_amount: i32, map: &Map, objects: &mut [Object]) {
+    let x = objects[PLAYER_ID].x + x_amount;
+    let y = objects[PLAYER_ID].y + y_amount;
+
+    let target_id = objects.iter().position(|object| object.get_location() == (x, y));
+
+    match target_id {
+        Some(target_id) => {
+            println!(
+                "The {} laughs at your puny efforts to attack him!",
+                objects[target_id].name
+            );
+        }
+        None => {
+            object::move_by(PLAYER_ID, x_amount, y_amount, map, objects);
+        }
+    }
+}
+
 fn main() {
     let root = Root::initializer()
         .font("res/arial10x10.png", FontLayout::Tcod)
@@ -217,28 +280,17 @@ fn main() {
 
     tcod::system::set_fps(LIMIT_FPS);
 
-    let player_char = '@';
-    let player_color = WHITE;
+    let default_x = 0;
+    let default_y = 0;
+    let mut player = Object::new(default_x, default_y, '@', "player", WHITE, true);
+    player.alive = true;
 
-    let player = Object::new(0, 0, player_char, player_color);
-    let mut previous_player_position = player.get_location();
+    let mut previous_player_location = player.get_location();
 
-    let default_npc_location_width = (WINDOW_WIDTH / 2) - 5;
-    let default_npc_location_height = WINDOW_HEIGHT / 2;
-    let npc_char = '@';
-    let npc_color = YELLOW;
-
-    let npc = Object::new(
-        default_npc_location_width,
-        default_npc_location_height,
-        npc_char,
-        npc_color,
-    );
-
-    let mut objects = [player, npc];
+    let mut objects = vec![player];
 
     let mut game = Game {
-        map: make_map(&mut objects[0]),
+        map: make_map(&mut objects),
     };
 
     for y in 0..MAP_HEIGHT {
@@ -253,18 +305,25 @@ fn main() {
     }
 
     while !tcod.root.window_closed() {
-        let player_location = objects[0].get_location();
-        let fov_recompute = previous_player_position != (player_location.0, player_location.1);
+        let player_location = objects[PLAYER_ID].get_location();
+        let fov_recompute = previous_player_location != player_location;
 
         tcod.console.clear();
         render_all(&mut tcod, &mut game, &objects, fov_recompute);
         tcod.root.flush();
 
-        let player = &mut objects[0];
-        previous_player_position = player_location;
-        let exit_game_state = handle_key_input(&mut tcod, player, &game);
-        if exit_game_state {
+        previous_player_location = player_location;
+        let player_action = handle_key_input(&mut tcod, &mut objects, &game.map);
+        if player_action == PlayerAction::Exit {
             break;
+        }
+
+        if objects[PLAYER_ID].alive && player_action != PlayerAction::DidntTakeTurn {
+            for object in &objects {
+                if (object as *const _) != (&objects[PLAYER_ID] as *const _) {
+                    println!("The {} growls!", object.name);
+                }
+            }
         }
     }
 }
