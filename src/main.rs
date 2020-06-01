@@ -4,8 +4,8 @@ use tcod::colors::*;
 use tcod::console::*;
 use tcod::map::{FovAlgorithm, Map as FovMap};
 
-mod object;
-use object::Object;
+mod entity;
+use entity::Entity;
 
 pub mod tile;
 use tile::Tile;
@@ -67,50 +67,51 @@ enum PlayerAction {
     Exit,
 }
 
-fn handle_key_input(tcod: &mut Tcod, objects: &mut Vec<Object>, map: &Map) -> PlayerAction {
+fn handle_key_input(tcod: &mut Tcod, entities: &mut Vec<Entity>, map: &Map) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
 
     use PlayerAction::*;
 
     let key = tcod.root.wait_for_keypress(true);
-    let player_alive = objects[PLAYER_ID].alive;
+    let player_alive = entities[PLAYER_ID].alive;
     match (key, key.text(), player_alive) {
-        (Key {
-            code: Enter,
-            alt: true,
-            ..
-        },
-        _,
-        _,
-    ) => {
+        (
+            Key {
+                code: Enter,
+                alt: true,
+                ..
+            },
+            _,
+            _,
+        ) => {
             let fullscreen_state = tcod.root.is_fullscreen();
             tcod.root.set_fullscreen(!fullscreen_state);
             DidntTakeTurn
         }
         (Key { code: Escape, .. }, _, _) => Exit,
         (Key { code: Up, .. }, _, true) => {
-            player_move_or_attack(0, -1, map, objects);
+            player_move_or_attack(0, -1, map, entities);
             TookTurn
         }
         (Key { code: Down, .. }, _, true) => {
-            player_move_or_attack(0, 1, map, objects);
+            player_move_or_attack(0, 1, map, entities);
             TookTurn
         }
         (Key { code: Left, .. }, _, true) => {
-            player_move_or_attack(-1, 0, map, objects);
+            player_move_or_attack(-1, 0, map, entities);
             TookTurn
         }
         (Key { code: Right, .. }, _, true) => {
-            player_move_or_attack(1, 0, map, objects);
+            player_move_or_attack(1, 0, map, entities);
             TookTurn
         }
 
-        _ => DidntTakeTurn
+        _ => DidntTakeTurn,
     }
 }
 
-fn make_map(objects: &mut Vec<Object>) -> Map {
+fn make_map(entities: &mut Vec<Entity>) -> Map {
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
 
     let mut rooms = vec![];
@@ -129,12 +130,12 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
 
         if !rooms_intersect {
             create_room(new_room, &mut map);
-            place_objects(new_room, &map, objects);
+            place_entities(new_room, &map, entities);
 
             let (new_x, new_y) = new_room.center();
 
             if rooms.is_empty() {
-                objects[PLAYER_ID].set_location(new_x, new_y);
+                entities[PLAYER_ID].set_location(new_x, new_y);
             } else {
                 let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
                 if rand::random() {
@@ -153,9 +154,9 @@ fn make_map(objects: &mut Vec<Object>) -> Map {
     map
 }
 
-fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recompute: bool) {
+fn render_all(tcod: &mut Tcod, game: &mut Game, entities: &[Entity], fov_recompute: bool) {
     if fov_recompute {
-        let player_location = &objects[PLAYER_ID].get_location();
+        let player_location = &entities[PLAYER_ID].get_location();
 
         tcod.fov.compute_fov(
             player_location.0,
@@ -164,12 +165,6 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
             FOV_LIGHT_WALLS,
             FOV_ALGO,
         );
-    }
-    for object in objects {
-        let object_location = object.get_location();
-        if tcod.fov.is_in_fov(object_location.0, object_location.1) {
-            object.draw(&mut tcod.console);
-        }
     }
 
     for y in 0..MAP_HEIGHT {
@@ -193,6 +188,28 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
                     .set_char_background(x, y, color, BackgroundFlag::Set);
             }
         }
+    }
+
+    let mut to_draw: Vec<_> = entities
+        .iter()
+        .filter(|o| tcod.fov.is_in_fov(o.x, o.y))
+        .collect();
+
+    to_draw.sort_by(|o1, o2| o1.blocks.cmp(&o2.blocks));
+
+    for entity in &to_draw {
+        entity.draw(&mut tcod.console);
+    }
+
+    tcod.root.set_default_foreground(WHITE);
+    if let Some(fighter) = entities[PLAYER_ID].fighter {
+        tcod.root.print_ex(
+            1,
+            WINDOW_HEIGHT - 2,
+            BackgroundFlag::None,
+            TextAlignment::Left,
+            format!("HP: {}/{} ", fighter.hp, fighter.max_hp),
+        );
     }
 
     blit(
@@ -226,40 +243,82 @@ fn create_vertical_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
     }
 }
 
-fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
+fn place_entities(room: Rect, map: &Map, entities: &mut Vec<Entity>) {
     let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
 
     for _ in 0..num_monsters {
         let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
         let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
 
-        if !object::is_blocked(x, y, map, objects) {
+        if !entity::is_blocked(x, y, map, entities) {
             let mut monster = if rand::random::<f32>() < 0.8 {
-                Object::new(x, y, 'o', "orc", DESATURATED_GREEN, true)
+                let mut orc = Entity::new(x, y, 'o', "orc", DESATURATED_GREEN, true);
+                orc.fighter = Some(entity::Fighter {
+                    max_hp: 10,
+                    hp: 10,
+                    defense: 0,
+                    power: 3,
+                    on_death: entity::DeathCallback::Monster,
+                });
+                orc.ai = Some(entity::AI::Basic);
+                orc
             } else {
-                Object::new(x, y, 'T', "troll", DARKER_GREEN, true)
+                let mut troll = Entity::new(x, y, 'T', "troll", DARKER_GREEN, true);
+                troll.fighter = Some(entity::Fighter {
+                    max_hp: 16,
+                    hp: 16,
+                    defense: 1,
+                    power: 4,
+                    on_death: entity::DeathCallback::Monster,
+                });
+                troll.ai = Some(entity::AI::Basic);
+                troll
             };
             monster.alive = true;
-            objects.push(monster);
+            entities.push(monster);
         }
     }
 }
 
-pub fn player_move_or_attack(x_amount: i32, y_amount: i32, map: &Map, objects: &mut [Object]) {
-    let x = objects[PLAYER_ID].x + x_amount;
-    let y = objects[PLAYER_ID].y + y_amount;
+pub fn player_move_or_attack(x_amount: i32, y_amount: i32, map: &Map, entities: &mut [Entity]) {
+    let x = entities[PLAYER_ID].x + x_amount;
+    let y = entities[PLAYER_ID].y + y_amount;
 
-    let target_id = objects.iter().position(|object| object.get_location() == (x, y));
+    let target_id = entities
+        .iter()
+        .position(|entity| entity.fighter.is_some() && entity.get_location() == (x, y));
 
     match target_id {
         Some(target_id) => {
-            println!(
-                "The {} laughs at your puny efforts to attack him!",
-                objects[target_id].name
-            );
+            let (player, target) = mut_two(PLAYER_ID, target_id, entities);
+            player.attack(target);
         }
         None => {
-            object::move_by(PLAYER_ID, x_amount, y_amount, map, objects);
+            entity::move_by(PLAYER_ID, x_amount, y_amount, map, entities);
+        }
+    }
+}
+
+fn mut_two<T>(first_index: usize, second_index: usize, items: &mut [T]) -> (&mut T, &mut T) {
+    assert!(first_index != second_index);
+    let split_at_index = cmp::max(first_index, second_index);
+    let (first_slice, second_slice) = items.split_at_mut(split_at_index);
+    if first_index < second_index {
+        (&mut first_slice[first_index], &mut second_slice[0])
+    } else {
+        (&mut second_slice[0], &mut first_slice[second_index])
+    }
+}
+
+fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &Game, entities: &mut [Entity]) {
+    let (monster_x, monster_y) = entities[monster_id].get_location();
+    if tcod.fov.is_in_fov(monster_x, monster_y) {
+        if entities[monster_id].distance_to(&entities[PLAYER_ID]) >= 2.0 {
+            let (player_x, player_y) = entities[PLAYER_ID].get_location();
+            entity::move_towards(monster_id, player_x, player_y, &game.map, entities);
+        } else if entities[PLAYER_ID].fighter.map_or(false, |f| f.hp > 0) {
+            let (monster, player) = mut_two(monster_id, PLAYER_ID, entities);
+            monster.attack(player);
         }
     }
 }
@@ -282,15 +341,24 @@ fn main() {
 
     let default_x = 0;
     let default_y = 0;
-    let mut player = Object::new(default_x, default_y, '@', "player", WHITE, true);
+    let mut player = Entity::new(default_x, default_y, '@', "player", WHITE, true);
+
+    player.fighter = Some(entity::Fighter {
+        max_hp: 30,
+        hp: 30,
+        defense: 2,
+        power: 5,
+        on_death: entity::DeathCallback::Player,
+    });
+
     player.alive = true;
 
     let mut previous_player_location = player.get_location();
 
-    let mut objects = vec![player];
+    let mut entities = vec![player];
 
     let mut game = Game {
-        map: make_map(&mut objects),
+        map: make_map(&mut entities),
     };
 
     for y in 0..MAP_HEIGHT {
@@ -305,23 +373,23 @@ fn main() {
     }
 
     while !tcod.root.window_closed() {
-        let player_location = objects[PLAYER_ID].get_location();
+        let player_location = entities[PLAYER_ID].get_location();
         let fov_recompute = previous_player_location != player_location;
 
         tcod.console.clear();
-        render_all(&mut tcod, &mut game, &objects, fov_recompute);
+        render_all(&mut tcod, &mut game, &entities, fov_recompute);
         tcod.root.flush();
 
         previous_player_location = player_location;
-        let player_action = handle_key_input(&mut tcod, &mut objects, &game.map);
+        let player_action = handle_key_input(&mut tcod, &mut entities, &game.map);
         if player_action == PlayerAction::Exit {
             break;
         }
 
-        if objects[PLAYER_ID].alive && player_action != PlayerAction::DidntTakeTurn {
-            for object in &objects {
-                if (object as *const _) != (&objects[PLAYER_ID] as *const _) {
-                    println!("The {} growls!", object.name);
+        if entities[PLAYER_ID].alive && player_action != PlayerAction::DidntTakeTurn {
+            for id in 0..entities.len() {
+                if entities[id].ai.is_some() {
+                    ai_take_turn(id, &tcod, &game, &mut entities);
                 }
             }
         }
