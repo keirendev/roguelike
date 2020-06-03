@@ -1,7 +1,7 @@
 use tcod::colors::*;
 use tcod::console::*;
 
-use crate::game::Map;
+use crate::game::{Game, Map};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fighter {
@@ -19,13 +19,13 @@ pub enum DeathCallback {
 }
 
 impl DeathCallback {
-    fn callback(self, entity: &mut Entity) {
+    fn callback(self, entity: &mut Entity, game: &mut Game) {
         use DeathCallback::*;
-        let callback: fn(&mut Entity) = match self {
+        let callback = match self {
             Player => player_death,
             Monster => monster_death,
         };
-        callback(entity);
+        callback(entity, game);
     }
 }
 
@@ -73,12 +73,7 @@ impl Entity {
 
     pub fn draw(&self, console: &mut dyn Console) {
         console.set_default_foreground(self.color);
-        console.put_char(
-            self.x,
-            self.y,
-            self.char,
-            BackgroundFlag::None,
-        );
+        console.put_char(self.x, self.y, self.char, BackgroundFlag::None);
     }
 
     pub fn distance_to(&self, other: &Entity) -> f32 {
@@ -87,7 +82,7 @@ impl Entity {
         ((distance_x.pow(2) + distance_y.pow(2)) as f32).sqrt()
     }
 
-    pub fn take_damage(&mut self, damage: i32) {
+    pub fn take_damage(&mut self, damage: i32, game: &mut Game) {
         if let Some(fighter) = self.fighter.as_mut() {
             if damage > 0 {
                 fighter.hp -= damage;
@@ -97,23 +92,29 @@ impl Entity {
         if let Some(fighter) = self.fighter {
             if fighter.hp <= 0 {
                 self.alive = false;
-                fighter.on_death.callback(self);
+                fighter.on_death.callback(self, game);
             }
         }
     }
 
-    pub fn attack(&mut self, target: &mut Entity) {
+    pub fn attack(&mut self, target: &mut Entity, game: &mut Game) {
         let damage = self.fighter.map_or(0, |f| f.power) - target.fighter.map_or(0, |f| f.defense);
         if damage > 0 {
-            println!(
-                "{} attacks {} for {} hit points.",
-                self.name, target.name, damage
+            game.messages.add(
+                format!(
+                    "{} attacks {} for {} hit points.",
+                    self.name, target.name, damage
+                ),
+                WHITE,
             );
-            target.take_damage(damage);
+            target.take_damage(damage, game);
         } else {
-            println!(
-                "{} attacks {} but it has no effect!",
-                self.name, target.name
+            game.messages.add(
+                format!(
+                    "{} attacks {} but it has no effect!",
+                    self.name, target.name
+                ),
+                WHITE,
             );
         }
     }
@@ -148,15 +149,16 @@ pub fn move_towards(id: usize, target_x: i32, target_y: i32, map: &Map, entities
     move_by(id, distance_x, distance_y, map, entities);
 }
 
-fn player_death(player: &mut Entity) {
-    println!("You died!");
+fn player_death(player: &mut Entity, game: &mut Game) {
+    game.messages.add("You died!", RED);
 
     player.char = '%';
     player.color = DARK_RED;
 }
 
-fn monster_death(monster: &mut Entity) {
-    println!("{} is dead!", monster.name);
+fn monster_death(monster: &mut Entity, game: &mut Game) {
+    game.messages
+        .add(format!("{} is dead!", monster.name), ORANGE);
     monster.color = DARK_RED;
     monster.blocks = false;
     monster.fighter = None;

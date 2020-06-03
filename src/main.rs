@@ -2,6 +2,7 @@ use rand::Rng;
 use std::cmp;
 use tcod::colors::*;
 use tcod::console::*;
+use tcod::input::{self, Event, Key, Mouse};
 use tcod::map::{FovAlgorithm, Map as FovMap};
 
 mod entity;
@@ -17,11 +18,22 @@ use game::Map;
 mod rect;
 use rect::Rect;
 
+mod messages;
+use messages::Messages;
+
 const WINDOW_WIDTH: i32 = 80;
 const WINDOW_HEIGHT: i32 = 50;
 
 const MAP_WIDTH: i32 = 80;
-const MAP_HEIGHT: i32 = 45;
+const MAP_HEIGHT: i32 = 43;
+
+const BAR_WIDTH: i32 = 20;
+const PANEL_HEIGHT: i32 = 7;
+const PANEL_Y: i32 = WINDOW_HEIGHT - PANEL_HEIGHT;
+
+const MSG_X: i32 = BAR_WIDTH + 2;
+const MSG_WIDTH: i32 = WINDOW_WIDTH - BAR_WIDTH - 2;
+const MSG_HEIGHT: usize = PANEL_HEIGHT as usize - 1;
 
 const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
@@ -57,7 +69,10 @@ const PLAYER_ID: usize = 0;
 struct Tcod {
     root: Root,
     console: Offscreen,
+    panel: Offscreen,
     fov: FovMap,
+    key: Key,
+    mouse: Mouse,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,15 +82,13 @@ enum PlayerAction {
     Exit,
 }
 
-fn handle_key_input(tcod: &mut Tcod, entities: &mut Vec<Entity>, map: &Map) -> PlayerAction {
-    use tcod::input::Key;
+fn handle_key_input(tcod: &mut Tcod, entities: &mut Vec<Entity>, game: &mut Game) -> PlayerAction {
     use tcod::input::KeyCode::*;
 
     use PlayerAction::*;
 
-    let key = tcod.root.wait_for_keypress(true);
     let player_alive = entities[PLAYER_ID].alive;
-    match (key, key.text(), player_alive) {
+    match (tcod.key, tcod.key.text(), player_alive) {
         (
             Key {
                 code: Enter,
@@ -91,19 +104,19 @@ fn handle_key_input(tcod: &mut Tcod, entities: &mut Vec<Entity>, map: &Map) -> P
         }
         (Key { code: Escape, .. }, _, _) => Exit,
         (Key { code: Up, .. }, _, true) => {
-            player_move_or_attack(0, -1, map, entities);
+            player_move_or_attack(0, -1, game, entities);
             TookTurn
         }
         (Key { code: Down, .. }, _, true) => {
-            player_move_or_attack(0, 1, map, entities);
+            player_move_or_attack(0, 1, game, entities);
             TookTurn
         }
         (Key { code: Left, .. }, _, true) => {
-            player_move_or_attack(-1, 0, map, entities);
+            player_move_or_attack(-1, 0, game, entities);
             TookTurn
         }
         (Key { code: Right, .. }, _, true) => {
-            player_move_or_attack(1, 0, map, entities);
+            player_move_or_attack(1, 0, game, entities);
             TookTurn
         }
 
@@ -201,23 +214,59 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, entities: &[Entity], fov_recompu
         entity.draw(&mut tcod.console);
     }
 
-    tcod.root.set_default_foreground(WHITE);
-    if let Some(fighter) = entities[PLAYER_ID].fighter {
-        tcod.root.print_ex(
-            1,
-            WINDOW_HEIGHT - 2,
-            BackgroundFlag::None,
-            TextAlignment::Left,
-            format!("HP: {}/{} ", fighter.hp, fighter.max_hp),
-        );
-    }
-
     blit(
         &tcod.console,
         (0, 0),
-        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (MAP_WIDTH, MAP_HEIGHT),
         &mut tcod.root,
         (0, 0),
+        1.0,
+        1.0,
+    );
+
+    tcod.panel.set_default_background(BLACK);
+    tcod.panel.clear();
+
+    let mut y = MSG_HEIGHT as i32;
+    for &(ref msg, color) in game.messages.iter().rev() {
+        let msg_height = tcod.panel.get_height_rect(MSG_X, y, MSG_WIDTH, 0, msg);
+        y -= msg_height;
+        if y < 0 {
+            break;
+        }
+        tcod.panel.set_default_foreground(color);
+        tcod.panel.print_rect(MSG_X, y, MSG_WIDTH, 0, msg);
+    }
+
+    let hp = entities[PLAYER_ID].fighter.map_or(0, |f| f.hp);
+    let max_hp = entities[PLAYER_ID].fighter.map_or(0, |f| f.max_hp);
+    render_bar(
+        &mut tcod.panel,
+        1,
+        1,
+        BAR_WIDTH,
+        "HP",
+        hp,
+        max_hp,
+        LIGHT_RED,
+        DARKER_RED,
+    );
+
+    tcod.panel.set_default_foreground(LIGHT_GREY);
+    tcod.panel.print_ex(
+        1,
+        0,
+        BackgroundFlag::None,
+        TextAlignment::Left,
+        get_names_under_mouse(tcod.mouse, entities, &tcod.fov),
+    );
+
+    blit(
+        &tcod.panel,
+        (0, 0),
+        (WINDOW_WIDTH, PANEL_HEIGHT),
+        &mut tcod.root,
+        (0, PANEL_Y),
         1.0,
         1.0,
     );
@@ -280,7 +329,12 @@ fn place_entities(room: Rect, map: &Map, entities: &mut Vec<Entity>) {
     }
 }
 
-pub fn player_move_or_attack(x_amount: i32, y_amount: i32, map: &Map, entities: &mut [Entity]) {
+pub fn player_move_or_attack(
+    x_amount: i32,
+    y_amount: i32,
+    game: &mut Game,
+    entities: &mut [Entity],
+) {
     let x = entities[PLAYER_ID].x + x_amount;
     let y = entities[PLAYER_ID].y + y_amount;
 
@@ -291,10 +345,10 @@ pub fn player_move_or_attack(x_amount: i32, y_amount: i32, map: &Map, entities: 
     match target_id {
         Some(target_id) => {
             let (player, target) = mut_two(PLAYER_ID, target_id, entities);
-            player.attack(target);
+            player.attack(target, game);
         }
         None => {
-            entity::move_by(PLAYER_ID, x_amount, y_amount, map, entities);
+            entity::move_by(PLAYER_ID, x_amount, y_amount, &game.map, entities);
         }
     }
 }
@@ -310,7 +364,7 @@ fn mut_two<T>(first_index: usize, second_index: usize, items: &mut [T]) -> (&mut
     }
 }
 
-fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &Game, entities: &mut [Entity]) {
+fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &mut Game, entities: &mut [Entity]) {
     let (monster_x, monster_y) = entities[monster_id].get_location();
     if tcod.fov.is_in_fov(monster_x, monster_y) {
         if entities[monster_id].distance_to(&entities[PLAYER_ID]) >= 2.0 {
@@ -318,9 +372,52 @@ fn ai_take_turn(monster_id: usize, tcod: &Tcod, game: &Game, entities: &mut [Ent
             entity::move_towards(monster_id, player_x, player_y, &game.map, entities);
         } else if entities[PLAYER_ID].fighter.map_or(false, |f| f.hp > 0) {
             let (monster, player) = mut_two(monster_id, PLAYER_ID, entities);
-            monster.attack(player);
+            monster.attack(player, game);
         }
     }
+}
+
+fn render_bar(
+    panel: &mut Offscreen,
+    x: i32,
+    y: i32,
+    total_width: i32,
+    name: &str,
+    value: i32,
+    maximum: i32,
+    bar_color: Color,
+    back_color: Color,
+) {
+    let bar_width = (value as f32 / maximum as f32 * total_width as f32) as i32;
+
+    panel.set_default_background(back_color);
+    panel.rect(x, y, total_width, 1, false, BackgroundFlag::Screen);
+
+    panel.set_default_background(bar_color);
+    if bar_width > 0 {
+        panel.rect(x, y, bar_width, 1, false, BackgroundFlag::Screen);
+    }
+
+    panel.set_default_foreground(WHITE);
+    panel.print_ex(
+        x + total_width / 2,
+        y,
+        BackgroundFlag::None,
+        TextAlignment::Center,
+        &format!("{}: {}/{}", name, value, maximum),
+    );
+}
+
+fn get_names_under_mouse(mouse: Mouse, entities: &[Entity], fov_map: &FovMap) -> String {
+    let (x, y) = (mouse.cx as i32, mouse.cy as i32);
+
+    let names = entities
+        .iter()
+        .filter(|obj| obj.get_location() == (x, y) && fov_map.is_in_fov(obj.x, obj.y))
+        .map(|obj| obj.name.clone())
+        .collect::<Vec<_>>();
+
+    names.join(", ")
 }
 
 fn main() {
@@ -334,7 +431,10 @@ fn main() {
     let mut tcod = Tcod {
         root,
         console: Offscreen::new(MAP_WIDTH, MAP_HEIGHT),
+        panel: Offscreen::new(WINDOW_WIDTH, PANEL_HEIGHT),
         fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
+        key: Default::default(),
+        mouse: Default::default(),
     };
 
     tcod::system::set_fps(LIMIT_FPS);
@@ -359,6 +459,7 @@ fn main() {
 
     let mut game = Game {
         map: make_map(&mut entities),
+        messages: Messages::new(),
     };
 
     for y in 0..MAP_HEIGHT {
@@ -372,16 +473,27 @@ fn main() {
         }
     }
 
+    game.messages.add(
+        "Welcome stranger! Prepare to perish in the Tombs of the Ancient Kings.",
+        RED,
+    );
+
     while !tcod.root.window_closed() {
         let player_location = entities[PLAYER_ID].get_location();
         let fov_recompute = previous_player_location != player_location;
+
+        match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
+            Some((_, Event::Mouse(m))) => tcod.mouse = m,
+            Some((_, Event::Key(k))) => tcod.key = k,
+            _ => tcod.key = Default::default(),
+        }
 
         tcod.console.clear();
         render_all(&mut tcod, &mut game, &entities, fov_recompute);
         tcod.root.flush();
 
         previous_player_location = player_location;
-        let player_action = handle_key_input(&mut tcod, &mut entities, &game.map);
+        let player_action = handle_key_input(&mut tcod, &mut entities, &mut game);
         if player_action == PlayerAction::Exit {
             break;
         }
@@ -389,7 +501,7 @@ fn main() {
         if entities[PLAYER_ID].alive && player_action != PlayerAction::DidntTakeTurn {
             for id in 0..entities.len() {
                 if entities[id].ai.is_some() {
-                    ai_take_turn(id, &tcod, &game, &mut entities);
+                    ai_take_turn(id, &tcod, &mut game, &mut entities);
                 }
             }
         }
