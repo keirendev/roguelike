@@ -40,6 +40,11 @@ const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
 
 const MAX_ROOM_MONSTERS: i32 = 3;
+const MAX_ROOM_ITEMS: i32 = 2;
+
+const INVENTORY_WIDTH: i32 = 50;
+
+const HEAL_AMOUNT: i32 = 4;
 
 const FOV_ALGO: FovAlgorithm = FovAlgorithm::Basic;
 const FOV_LIGHT_WALLS: bool = true;
@@ -118,6 +123,33 @@ fn handle_key_input(tcod: &mut Tcod, entities: &mut Vec<Entity>, game: &mut Game
         (Key { code: Right, .. }, _, true) => {
             player_move_or_attack(1, 0, game, entities);
             TookTurn
+        }
+        (Key { code: Text, .. }, "g", true) => {
+            let item_id = entities.iter().position(|entity| {
+                entity.get_location() == entities[PLAYER_ID].get_location() && entity.item.is_some()
+            });
+            if let Some(item_id) = item_id {
+                pick_item_up(item_id, game, entities);
+            }
+            DidntTakeTurn
+        }
+        (Key { code: Text, .. }, "i", true) => {
+            let original_inventory_length = &game.inventory.len();
+            let inventory_index = inventory_menu(
+                &game.inventory,
+                "Press the key next to an item to use it, or any other to cancel.\n",
+                &mut tcod.root,
+            );
+            if let Some(inventory_index) = inventory_index {
+                use_item(inventory_index, tcod, game, entities);
+            }
+            if original_inventory_length > &game.inventory.len()
+            {
+                TookTurn
+            }
+            else {
+                DidntTakeTurn
+            }
         }
 
         _ => DidntTakeTurn,
@@ -327,6 +359,19 @@ fn place_entities(room: Rect, map: &Map, entities: &mut Vec<Entity>) {
             entities.push(monster);
         }
     }
+
+    let num_items = rand::thread_rng().gen_range(0, MAX_ROOM_ITEMS + 1);
+
+    for _ in 0..num_items {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        if !entity::is_blocked(x, y, map, entities) {
+            let mut entity = Entity::new(x, y, '!', "healing potion", VIOLET, false);
+            entity.item = Some(entity::Item::Heal);
+            entities.push(entity);
+        }
+    }
 }
 
 pub fn player_move_or_attack(
@@ -420,6 +465,133 @@ fn get_names_under_mouse(mouse: Mouse, entities: &[Entity], fov_map: &FovMap) ->
     names.join(", ")
 }
 
+fn pick_item_up(object_id: usize, game: &mut Game, entities: &mut Vec<Entity>) {
+    if game.inventory.len() >= 26 {
+        game.messages.add(
+            format!(
+                "Your inventory is full, cannot pick up {}.",
+                entities[object_id].name
+            ),
+            RED,
+        );
+    } else {
+        let item = entities.swap_remove(object_id);
+        game.messages
+            .add(format!("You picked up a {}!", item.name), GREEN);
+        game.inventory.push(item);
+    }
+}
+
+fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root) -> Option<usize> {
+    assert!(
+        options.len() <= 26,
+        "Cannot have a menu with more than 26 options."
+    );
+
+    let header_height = root.get_height_rect(0, 0, width, WINDOW_HEIGHT, header);
+    let height = options.len() as i32 + header_height;
+
+    let mut window = Offscreen::new(width, height);
+
+    window.set_default_foreground(WHITE);
+    window.print_rect_ex(
+        0,
+        0,
+        width,
+        height,
+        BackgroundFlag::None,
+        TextAlignment::Left,
+        header,
+    );
+
+    for (index, option_text) in options.iter().enumerate() {
+        let menu_letter = (b'a' + index as u8) as char;
+        let text = format!("({}) {}", menu_letter, option_text.as_ref());
+        window.print_ex(
+            0,
+            header_height + index as i32,
+            BackgroundFlag::None,
+            TextAlignment::Left,
+            text,
+        );
+    }
+
+    let x = WINDOW_WIDTH / 2 - width / 2;
+    let y = WINDOW_HEIGHT / 2 - height / 2;
+    blit(&window, (0, 0), (width, height), root, (x, y), 1.0, 0.7);
+
+    root.flush();
+    let key = root.wait_for_keypress(true);
+
+    if key.printable.is_alphabetic() {
+        let index = key.printable.to_ascii_lowercase() as usize - 'a' as usize;
+        if index < options.len() {
+            Some(index)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn inventory_menu(inventory: &[Entity], header: &str, root: &mut Root) -> Option<usize> {
+    let options = if inventory.len() == 0 {
+        vec!["Inventory is empty.".into()]
+    } else {
+        inventory.iter().map(|item| item.name.clone()).collect()
+    };
+
+    let inventory_index = menu(header, &options, INVENTORY_WIDTH, root);
+
+    if inventory.len() > 0 {
+        inventory_index
+    } else {
+        None
+    }
+}
+
+fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, entities: &mut [Entity]) {
+    use entity::Item::*;
+    if let Some(item) = game.inventory[inventory_id].item {
+        let on_use = match item {
+            Heal => cast_heal,
+        };
+        match on_use(inventory_id, tcod, game, entities) {
+            entity::UseResult::UsedUp => {
+                game.inventory.remove(inventory_id);
+            }
+            entity::UseResult::Cancelled => {
+                game.messages.add("Cancelled", WHITE);
+            }
+        }
+    } else {
+        game.messages.add(
+            format!("The {} cannot be used.", game.inventory[inventory_id].name),
+            WHITE,
+        );
+    }
+}
+
+fn cast_heal(
+    _inventory_id: usize,
+    _tcod: &mut Tcod,
+    game: &mut Game,
+    entities: &mut [Entity],
+) -> entity::UseResult {
+    if let Some(fighter) = entities[PLAYER_ID].fighter {
+        if fighter.hp == fighter.max_hp {
+            game.messages.add("You are already at full health.", RED);
+            return entity::UseResult::Cancelled;
+        }
+        game.messages
+            .add("Your wounds start to feel better!", LIGHT_VIOLET);
+        entities[PLAYER_ID].heal(HEAL_AMOUNT);
+        return entity::UseResult::UsedUp;
+    }
+    entity::UseResult::Cancelled
+}
+
 fn main() {
     let root = Root::initializer()
         .font("res/arial10x10.png", FontLayout::Tcod)
@@ -460,6 +632,7 @@ fn main() {
     let mut game = Game {
         map: make_map(&mut entities),
         messages: Messages::new(),
+        inventory: vec![],
     };
 
     for y in 0..MAP_HEIGHT {

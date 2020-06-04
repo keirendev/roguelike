@@ -34,6 +34,16 @@ pub enum AI {
     Basic,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Item {
+    Heal,
+}
+
+pub enum UseResult {
+    UsedUp,
+    Cancelled,
+}
+
 #[derive(Debug)]
 pub struct Entity {
     pub x: i32,
@@ -45,6 +55,7 @@ pub struct Entity {
     pub alive: bool,
     pub fighter: Option<Fighter>,
     pub ai: Option<AI>,
+    pub item: Option<Item>,
 }
 
 impl Entity {
@@ -59,6 +70,7 @@ impl Entity {
             alive: false,
             fighter: None,
             ai: None,
+            item: None,
         }
     }
 
@@ -93,6 +105,15 @@ impl Entity {
             if fighter.hp <= 0 {
                 self.alive = false;
                 fighter.on_death.callback(self, game);
+            }
+        }
+    }
+
+    pub fn heal(&mut self, amount: i32) {
+        if let Some(ref mut fighter) = self.fighter {
+            fighter.hp += amount;
+            if fighter.hp > fighter.max_hp {
+                fighter.hp = fighter.max_hp;
             }
         }
     }
