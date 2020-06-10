@@ -1,7 +1,3 @@
 # roguelike
 
-git clone https://github.com/keirendev/roguelike.git
-
-cd roguelike
-
-cargo run --release
+My implementation of https://tomassedovic.github.io/roguelike-tutorial/index.html
